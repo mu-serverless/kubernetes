@@ -545,6 +545,12 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for %v %#v: %v", rsc.Kind, rs, err))
 		return nil
 	}
+	functionName := metav1.NewControllerRef(rs, rsc.GroupVersionKind).GetName() // Get the function Name (Deployment name): https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/controller_ref_manager.go
+	var (
+		mu sync.Mutex // guards balance
+		nodeNameList []string
+	)
+	nodeNameList := GetPlacementDecision(functionName)
 	if diff < 0 {
 		diff *= -1
 		if diff > rsc.burstReplicas {
@@ -566,7 +572,23 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		// after one of its pods fails.  Conveniently, this also prevents the
 		// event spam that those failures would generate.
 		successfulCreations, err := slowStartBatch(diff, controller.SlowStartInitialBatchSize, func() error {
-			err := rsc.podControl.CreatePodsWithControllerRef(rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
+			nodeName := ""
+			// mu.Lock()
+			for i, _ := range nodeNameList {
+				mu.Lock()
+				if nodeNameList[i] != "" {
+					nodeName = nodeNameList[i]
+					nodeNameList[i] = ""
+					break
+				}
+				mu.Unlock()
+			}
+			// mu.Unlock()
+			if nodeName != "" {
+				err := rsc.podControl.CreatePodsOnNode(nodeName, rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
+			} else {
+				err := rsc.podControl.CreatePodsWithControllerRef(rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
+			}
 			if err != nil {
 				if errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
 					// if the namespace is being terminated, we don't have to do
@@ -831,4 +853,75 @@ func getPodKeys(pods []*v1.Pod) []string {
 		podKeys = append(podKeys, controller.PodKey(pod))
 	}
 	return podKeys
+}
+
+var gvr = schema.GroupVersionResource{
+	Group:    "placement.com",
+	Version:  "v1",
+	Resource: "decisions",
+}
+
+type PlacementDecisionCRDSpec struct {
+	NodeNameList string `json:"nodeNameList"`
+	NumNodes int `json:"numNodes"`
+}
+
+type PlacementDecisionCRD struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec PlacementDecisionCRDSpec `json:"spec,omitempty"`
+}
+
+type PlacementDecisionCRDList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+
+	Items []PlacementDecisionCRD `json:"items"`
+}
+
+func getPlacementDecision(client dynamic.Interface, namespace string, name string) (*PlacementDecisionCRD, error) {
+	utd, err := client.Resource(gvr).Namespace(namespace).Get(name, metav1.GetOptions{})
+	if err != nil {
+			return nil, err
+	}
+	data, err := utd.MarshalJSON()
+	if err != nil {
+			return nil, err
+	}
+	var ct PlacementDecisionCRD
+	if err := json.Unmarshal(data, &ct); err != nil {
+			return nil, err
+	}
+	return &ct, nil
+}
+
+func GetPlacementDecision(functionName string) (nodeName []string) {
+	// creates the in-cluster config
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		panic(err.Error())
+	}
+	// creates the clientset
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	// Find the CRD for the current function
+	ct, err := getPlacementDecision(client, "default", functionName)
+	if err != nil {
+		// panic(err)
+		fmt.Printf("No CRD object for function-%s\n", functionName)
+	}
+	fmt.Printf("%s %s %s %s\n", ct.Namespace, ct.Name, ct.Spec.nodeNameList, ct.Spec.numNodes)
+
+	nodeNameList := ct.Spec.nodeNameList
+	numNodes := ct.Spec.numNodes
+	nodeName := make([numNodes]string, "")
+	parts := strings.Split(nodeNameList, "%")
+	for i, _ := range parts {
+		nodeName[i] = parts[i]
+	}
+	return nodeName
 }

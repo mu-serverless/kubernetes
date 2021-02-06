@@ -546,10 +546,6 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		return nil
 	}
 	functionName := metav1.NewControllerRef(rs, rsc.GroupVersionKind).GetName() // Get the function Name (Deployment name): https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/controller_ref_manager.go
-	var (
-		mu sync.Mutex // guards balance
-		nodeNameList []string
-	)
 	nodeNameList := GetPlacementDecision(functionName)
 	if diff < 0 {
 		diff *= -1
@@ -563,41 +559,39 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		// beforehand and store it via ExpectCreations.
 		rsc.expectations.ExpectCreations(rsKey, diff)
 		klog.V(2).InfoS("Too few replicas", "replicaSet", klog.KObj(rs), "need", *(rs.Spec.Replicas), "creating", diff)
-		// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
-		// and double with each successful iteration in a kind of "slow start".
-		// This handles attempts to start large numbers of pods that would
-		// likely all fail with the same error. For example a project with a
-		// low quota that attempts to create a large number of pods will be
-		// prevented from spamming the API service with the pod create requests
-		// after one of its pods fails.  Conveniently, this also prevents the
-		// event spam that those failures would generate.
-		successfulCreations, err := slowStartBatch(diff, controller.SlowStartInitialBatchSize, func() error {
-			nodeName := ""
-			// mu.Lock()
-			for i, _ := range nodeNameList {
-				mu.Lock()
-				if nodeNameList[i] != "" {
-					nodeName = nodeNameList[i]
-					nodeNameList[i] = ""
-					break
-				}
-				mu.Unlock()
-			}
-			// mu.Unlock()
-			if nodeName != "" {
-				err := rsc.podControl.CreatePodsOnNode(nodeName, rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
-			} else {
+		if nodeNameList == nil {
+			// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
+			// and double with each successful iteration in a kind of "slow start".
+			// This handles attempts to start large numbers of pods that would
+			// likely all fail with the same error. For example a project with a
+			// low quota that attempts to create a large number of pods will be
+			// prevented from spamming the API service with the pod create requests
+			// after one of its pods fails.  Conveniently, this also prevents the
+			// event spam that those failures would generate.
+			successfulCreations, err := slowStartBatch(diff, controller.SlowStartInitialBatchSize, func() error {
 				err := rsc.podControl.CreatePodsWithControllerRef(rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
-			}
-			if err != nil {
-				if errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
-					// if the namespace is being terminated, we don't have to do
-					// anything because any creation will fail
-					return nil
+				if err != nil {
+					if errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
+						// if the namespace is being terminated, we don't have to do
+						// anything because any creation will fail
+						return nil
+					}
 				}
-			}
-			return err
-		})
+				return err
+			})
+		} else {
+			successfulCreations, err := fastStartBatch(diff, nodeNameList, func(nodeName string) error {
+				err := rsc.podControl.CreatePodsOnNode(nodeName, rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
+				if err != nil {
+					if errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
+						// if the namespace is being terminated, we don't have to do
+						// anything because any creation will fail
+						return nil
+					}
+				}
+				return err
+			})
+		}
 
 		// Any skipped pods that we never attempted to start shouldn't be expected.
 		// The skipped pods will be retried later. The next controller resync will
@@ -782,6 +776,30 @@ func slowStartBatch(count int, initialBatchSize int, fn func() error) (int, erro
 			return successes, <-errCh
 		}
 		remaining -= batchSize
+	}
+	return successes, nil
+}
+
+// fastStartBatch tries to create all the Pods in one batch
+func fastStartBatch(count int, nodeNameList []string, fn func(nodeName string) error) (int, error) {
+	successes := 0
+	batchSize := count
+	errCh := make(chan error, batchSize)
+	var wg sync.WaitGroup
+	wg.Add(batchSize)
+	for i := 0; i < batchSize; i++ {
+		go func() {
+			defer wg.Done()
+			if err := fn(nodeNameList[i]); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	wg.Wait()
+	curSuccesses := batchSize - len(errCh)
+	successes += curSuccesses
+	if len(errCh) > 0 {
+		return successes, <-errCh
 	}
 	return successes, nil
 }

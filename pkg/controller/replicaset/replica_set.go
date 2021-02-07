@@ -61,6 +61,10 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/utils/integer"
+
+	"k8s.io/client-go/rest"
+	"encoding/json"
+	"k8s.io/client-go/dynamic"
 )
 
 const (
@@ -559,6 +563,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		// beforehand and store it via ExpectCreations.
 		rsc.expectations.ExpectCreations(rsKey, diff)
 		klog.V(2).InfoS("Too few replicas", "replicaSet", klog.KObj(rs), "need", *(rs.Spec.Replicas), "creating", diff)
+		var successfulCreations int
 		if nodeNameList == nil {
 			// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
 			// and double with each successful iteration in a kind of "slow start".
@@ -921,7 +926,7 @@ func GetPlacementDecision(functionName string) (nodeName []string) {
 		panic(err.Error())
 	}
 	// creates the clientset
-	client, err := kubernetes.NewForConfig(config)
+	client, err := dynamic.NewForConfig(config)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -932,11 +937,11 @@ func GetPlacementDecision(functionName string) (nodeName []string) {
 		// panic(err)
 		fmt.Printf("No CRD object for function-%s\n", functionName)
 	}
-	fmt.Printf("%s %s %s %s\n", ct.Namespace, ct.Name, ct.Spec.nodeNameList, ct.Spec.numNodes)
+	fmt.Printf("%s %s %s %s\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
 
-	nodeNameList := ct.Spec.nodeNameList
-	numNodes := ct.Spec.numNodes
-	nodeName := make([numNodes]string, "")
+	nodeNameList := ct.Spec.NodeNameList
+	numNodes := ct.Spec.NumNodes
+	nodeName = make([]string, int(numNodes))
 	parts := strings.Split(nodeNameList, "%")
 	for i, _ := range parts {
 		nodeName[i] = parts[i]

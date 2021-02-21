@@ -549,7 +549,9 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for %v %#v: %v", rsc.Kind, rs, err))
 		return nil
 	}
-	functionName := metav1.NewControllerRef(rs, rsc.GroupVersionKind).GetName() // Get the function Name (Deployment name): https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/controller_ref_manager.go
+	// functionName := metav1.NewControllerRef(rs, rsc.GroupVersionKind).GetName() // Get the function Name (Deployment name): https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/controller_ref_manager.go
+	functionName := metav1.GetControllerOfNoCopy(rs).Name
+	klog.InfoS("functionName: %v", functionName)
 	nodeNameList := GetPlacementDecision(functionName)
 	if diff < 0 {
 		diff *= -1
@@ -564,6 +566,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		rsc.expectations.ExpectCreations(rsKey, diff)
 		klog.V(2).InfoS("Too few replicas", "replicaSet", klog.KObj(rs), "need", *(rs.Spec.Replicas), "creating", diff)
 		var successfulCreations int
+		var err error
 		if nodeNameList == nil {
 			// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
 			// and double with each successful iteration in a kind of "slow start".
@@ -573,7 +576,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 			// prevented from spamming the API service with the pod create requests
 			// after one of its pods fails.  Conveniently, this also prevents the
 			// event spam that those failures would generate.
-			successfulCreations, err := slowStartBatch(diff, controller.SlowStartInitialBatchSize, func() error {
+			successfulCreations, err = slowStartBatch(diff, controller.SlowStartInitialBatchSize, func() error {
 				err := rsc.podControl.CreatePodsWithControllerRef(rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
 				if err != nil {
 					if errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
@@ -585,7 +588,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 				return err
 			})
 		} else {
-			successfulCreations, err := fastStartBatch(diff, nodeNameList, func(nodeName string) error {
+			successfulCreations, err = fastStartBatch(diff, nodeNameList, func(nodeName string) error {
 				err := rsc.podControl.CreatePodsOnNode(nodeName, rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
 				if err != nil {
 					if errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
@@ -904,7 +907,7 @@ type PlacementDecisionCRDList struct {
 }
 
 func getPlacementDecision(client dynamic.Interface, namespace string, name string) (*PlacementDecisionCRD, error) {
-	utd, err := client.Resource(gvr).Namespace(namespace).Get(name, metav1.GetOptions{})
+	utd, err := client.Resource(gvr).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
 			return nil, err
 	}

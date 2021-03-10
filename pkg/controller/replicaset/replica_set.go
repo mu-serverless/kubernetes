@@ -940,13 +940,13 @@ func GetPlacementDecision(functionName string) (nodeName []string) {
 		// panic(err)
 		fmt.Printf("No CRD object for function-%s\n", functionName)
 	}
-	fmt.Printf("%s %s %s %s\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
+	fmt.Printf("%s %s %s %d\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
 
 	nodeNameList := ct.Spec.NodeNameList
 	numNodes := ct.Spec.NumNodes
 	nodeName = make([]string, int(numNodes))
 	parts := strings.Split(nodeNameList, "%")
-	for i, _ := range parts {
+	for i := 0; i < int(numNodes); i++ {
 		nodeName[i] = parts[i]
 	}
 	return nodeName

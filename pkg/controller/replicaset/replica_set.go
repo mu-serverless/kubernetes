@@ -35,6 +35,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	// "path/filepath"
+	// "os"
 
 	apps "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
@@ -63,6 +65,7 @@ import (
 	"k8s.io/utils/integer"
 
 	"k8s.io/client-go/rest"
+	// "k8s.io/client-go/tools/clientcmd"
 	"encoding/json"
 	"k8s.io/client-go/dynamic"
 )
@@ -549,10 +552,13 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for %v %#v: %v", rsc.Kind, rs, err))
 		return nil
 	}
-	// functionName := metav1.NewControllerRef(rs, rsc.GroupVersionKind).GetName() // Get the function Name (Deployment name): https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/controller_ref_manager.go
-	functionName := metav1.GetControllerOfNoCopy(rs).Name
-	klog.InfoS("functionName: %v", functionName)
-	nodeNameList := GetPlacementDecision(functionName)
+
+	name := rs.Name
+	index := strings.LastIndex(name, "-")
+	functionName := name[:index]
+	klog.Infof("functionName: %s", functionName)
+	// nodeNameList := GetPlacementDecision(functionName)
+	// var nodeNameList []string
 	if diff < 0 {
 		diff *= -1
 		if diff > rsc.burstReplicas {
@@ -567,6 +573,8 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		klog.V(2).InfoS("Too few replicas", "replicaSet", klog.KObj(rs), "need", *(rs.Spec.Replicas), "creating", diff)
 		var successfulCreations int
 		var err error
+		klog.Infof("Try to get the placement decision for function: %s", functionName)
+		nodeNameList := GetPlacementDecision(functionName)
 		if nodeNameList == nil {
 			// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
 			// and double with each successful iteration in a kind of "slow start".
@@ -576,6 +584,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 			// prevented from spamming the API service with the pod create requests
 			// after one of its pods fails.  Conveniently, this also prevents the
 			// event spam that those failures would generate.
+			klog.InfoS("Try to run slowStartBatch")
 			successfulCreations, err = slowStartBatch(diff, controller.SlowStartInitialBatchSize, func() error {
 				err := rsc.podControl.CreatePodsWithControllerRef(rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
 				if err != nil {
@@ -588,6 +597,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 				return err
 			})
 		} else {
+			klog.InfoS("Try to run fastStartBatch")
 			successfulCreations, err = fastStartBatch(diff, nodeNameList, func(nodeName string) error {
 				err := rsc.podControl.CreatePodsOnNode(nodeName, rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
 				if err != nil {
@@ -923,11 +933,17 @@ func getPlacementDecision(client dynamic.Interface, namespace string, name strin
 }
 
 func GetPlacementDecision(functionName string) (nodeName []string) {
+	klog.InfoS("Try to create the in-cluter config")
 	// creates the in-cluster config
 	config, err := rest.InClusterConfig()
+	// kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	// kubeconfig := filepath.Join("/users/sqi009", ".kube", "config")
+	// klog.Infof("kubeconfig: %s", kubeconfig)
+	// config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		panic(err.Error())
 	}
+	klog.InfoS("in-cluter config created!")
 	// creates the clientset
 	client, err := dynamic.NewForConfig(config)
 	if err != nil {
@@ -938,9 +954,9 @@ func GetPlacementDecision(functionName string) (nodeName []string) {
 	ct, err := getPlacementDecision(client, "default", functionName)
 	if err != nil {
 		// panic(err)
-		fmt.Printf("No CRD object for function-%s\n", functionName)
+		klog.Infof("No CRD object for function-%s\n", functionName)
 	}
-	fmt.Printf("%s %s %s %d\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
+	klog.Infof("%s %s %s %d\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
 
 	nodeNameList := ct.Spec.NodeNameList
 	numNodes := ct.Spec.NumNodes

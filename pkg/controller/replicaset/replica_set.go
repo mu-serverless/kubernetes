@@ -35,8 +35,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	// "path/filepath"
-	// "os"
+	"path/filepath"
+	//"os"
 
 	apps "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
@@ -64,8 +64,8 @@ import (
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/utils/integer"
 
-	"k8s.io/client-go/rest"
-	// "k8s.io/client-go/tools/clientcmd"
+	//"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"encoding/json"
 	"k8s.io/client-go/dynamic"
 )
@@ -576,6 +576,11 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		klog.Infof("Try to get the placement decision for function: %s", functionName)
 		nodeNameList := GetPlacementDecision(functionName)
 		if nodeNameList == nil {
+			klog.Infof("Placement Decision of function %s is null", functionName)
+		} else {
+			klog.Infof("Placement Decision of function %s: %s", functionName, nodeNameList)
+		}
+		if nodeNameList == nil {
 			// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
 			// and double with each successful iteration in a kind of "slow start".
 			// This handles attempts to start large numbers of pods that would
@@ -935,11 +940,11 @@ func getPlacementDecision(client dynamic.Interface, namespace string, name strin
 func GetPlacementDecision(functionName string) (nodeName []string) {
 	klog.InfoS("Try to create the in-cluter config")
 	// creates the in-cluster config
-	config, err := rest.InClusterConfig()
+	// config, err := rest.InClusterConfig()
 	// kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	// kubeconfig := filepath.Join("/users/sqi009", ".kube", "config")
-	// klog.Infof("kubeconfig: %s", kubeconfig)
-	// config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	kubeconfig := filepath.Join("/users/sqi009", ".kube", "config")
+	klog.Infof("kubeconfig: %s", kubeconfig)
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -955,6 +960,7 @@ func GetPlacementDecision(functionName string) (nodeName []string) {
 	if err != nil {
 		// panic(err)
 		klog.Infof("No CRD object for function-%s\n", functionName)
+		return nil
 	}
 	klog.Infof("%s %s %s %d\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
 

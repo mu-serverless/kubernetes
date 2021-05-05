@@ -604,6 +604,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		} else {
 			klog.InfoS("Try to run fastStartBatch")
 			successfulCreations, err = fastStartBatch(diff, nodeNameList, func(nodeName string) error {
+				klog.Infof("nodename : %s", nodeName)
 				err := rsc.podControl.CreatePodsOnNode(nodeName, rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
 				if err != nil {
 					if errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
@@ -805,18 +806,20 @@ func slowStartBatch(count int, initialBatchSize int, fn func() error) (int, erro
 
 // fastStartBatch tries to create all the Pods in one batch
 func fastStartBatch(count int, nodeNameList []string, fn func(nodeName string) error) (int, error) {
+	klog.Infof("fastStartBatch: count: %d, nodeNameList: %s", count, nodeNameList)
 	successes := 0
 	batchSize := count
 	errCh := make(chan error, batchSize)
 	var wg sync.WaitGroup
 	wg.Add(batchSize)
 	for i := 0; i < batchSize; i++ {
-		go func() {
+		go func(idx int) {
 			defer wg.Done()
-			if err := fn(nodeNameList[i]); err != nil {
+			klog.Infof("go func(): count: %d, nodeNameList: %s, idx: %d", count, nodeNameList, idx)
+			if err := fn(nodeNameList[idx]); err != nil {
 				errCh <- err
 			}
-		}()
+		}(i)
 	}
 	wg.Wait()
 	curSuccesses := batchSize - len(errCh)

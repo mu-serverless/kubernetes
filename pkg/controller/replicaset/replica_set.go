@@ -554,6 +554,8 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 	}
 
 	name := rs.Name
+	klog.Infof("\nrs.Namespace: %v\n", rs.Namespace)
+	// nameSpace = rs.Namespace
 	index := strings.LastIndex(name, "-")
 	functionName := name[:index]
 	klog.Infof("functionName: %s", functionName)
@@ -574,7 +576,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		var successfulCreations int
 		var err error
 		klog.Infof("Try to get the placement decision for function: %s", functionName)
-		nodeNameList := GetPlacementDecision(functionName)
+		nodeNameList := GetPlacementDecision(functionName, rs.Namespace)
 		if nodeNameList == nil {
 			klog.Infof("Placement Decision of function %s is null", functionName)
 		} else {
@@ -924,6 +926,23 @@ type PlacementDecisionCRDList struct {
 	Items []PlacementDecisionCRD `json:"items"`
 }
 
+// func checkNS(client dynamic.Interface, name string) (error) {
+// 	namespace := ["kube-system", "istio-system", "knative-serving", "kube-node-lease", "kube-public", "kube-system"]
+// 	utd, err := client.Resource(gvr).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+// 	if err != nil {
+// 			return nil, err
+// 	}
+// 	data, err := utd.MarshalJSON()
+// 	if err != nil {
+// 			return nil, err
+// 	}
+// 	var ct PlacementDecisionCRD
+// 	if err := json.Unmarshal(data, &ct); err != nil {
+// 			return nil, err
+// 	}
+// 	return , nil
+// }
+
 func getPlacementDecision(client dynamic.Interface, namespace string, name string) (*PlacementDecisionCRD, error) {
 	utd, err := client.Resource(gvr).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
@@ -940,7 +959,11 @@ func getPlacementDecision(client dynamic.Interface, namespace string, name strin
 	return &ct, nil
 }
 
-func GetPlacementDecision(functionName string) (nodeName []string) {
+func GetPlacementDecision(functionName string, namespace string) (nodeName []string) {
+	if namespace != "default" {
+		klog.Infof("Pod is not belong to the default namespace. error ns: %s", namespace)
+		return nil
+	}
 	klog.InfoS("Try to create the in-cluter config")
 	// creates the in-cluster config
 	// config, err := rest.InClusterConfig()
@@ -958,7 +981,22 @@ func GetPlacementDecision(functionName string) (nodeName []string) {
 		panic(err.Error())
 	}
 
+	// Check whether the decision is enabled
+	ct, err := getPlacementDecision(client, "default", functionName)
+	for {
+		ct, err = getPlacementDecision(client, "default", functionName)
+		if err == nil {
+			// panic(err)
+			fmt.Printf("CRD object %s is found\n", functionName)
+			klog.Infof("%s %s %s %d\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
+			break
+		} else {
+			fmt.Printf("No CRD object of %s\n", functionName)
+		}
+	}
+
 	// Find the CRD for the current function
+	/*
 	ct, err := getPlacementDecision(client, "default", functionName)
 	if err != nil {
 		// panic(err)
@@ -966,6 +1004,7 @@ func GetPlacementDecision(functionName string) (nodeName []string) {
 		return nil
 	}
 	klog.Infof("%s %s %s %d\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
+	*/
 
 	nodeNameList := ct.Spec.NodeNameList
 	numNodes := ct.Spec.NumNodes

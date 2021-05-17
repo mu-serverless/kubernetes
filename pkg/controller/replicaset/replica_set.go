@@ -554,7 +554,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 	}
 
 	name := rs.Name
-	klog.Infof("\nrs.Namespace: %v\n", rs.Namespace)
+	// klog.Infof("\nrs.Namespace: %v\n", rs.Namespace)
 	// nameSpace = rs.Namespace
 	index := strings.LastIndex(name, "-")
 	functionName := name[:index]
@@ -577,12 +577,12 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		var err error
 		klog.Infof("Try to get the placement decision for function: %s", functionName)
 		nodeNameList := GetPlacementDecision(functionName, rs.Namespace)
-		if nodeNameList == nil {
-			klog.Infof("Placement Decision of function %s is null", functionName)
-		} else {
-			klog.Infof("Placement Decision of function %s: %s", functionName, nodeNameList)
-		}
-		if nodeNameList == nil {
+		// if nodeNameList == nil {
+		// 	klog.Infof("Placement Decision of function %s is null", functionName)
+		// } else {
+		// 	klog.Infof("Placement Decision of function %s: %s", functionName, nodeNameList)
+		// }
+		if nodeNameList == nil || diff != len(nodeNameList) {
 			// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
 			// and double with each successful iteration in a kind of "slow start".
 			// This handles attempts to start large numbers of pods that would
@@ -591,6 +591,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 			// prevented from spamming the API service with the pod create requests
 			// after one of its pods fails.  Conveniently, this also prevents the
 			// event spam that those failures would generate.
+			klog.Infof("# of nodeName: %d; Value of `diff`: %d", len(nodeNameList), diff)
 			klog.InfoS("Try to run slowStartBatch")
 			successfulCreations, err = slowStartBatch(diff, controller.SlowStartInitialBatchSize, func() error {
 				err := rsc.podControl.CreatePodsWithControllerRef(rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
@@ -961,7 +962,7 @@ func getPlacementDecision(client dynamic.Interface, namespace string, name strin
 
 func GetPlacementDecision(functionName string, namespace string) (nodeName []string) {
 	if namespace != "default" {
-		klog.Infof("Pod is not belong to the default namespace. error ns: %s", namespace)
+		// klog.Infof("Pod is not belong to the default namespace. error ns: %s", namespace)
 		return nil
 	}
 	klog.InfoS("Try to create the in-cluter config")
@@ -990,9 +991,9 @@ func GetPlacementDecision(functionName string, namespace string) (nodeName []str
 			fmt.Printf("CRD object %s is found\n", functionName)
 			klog.Infof("%s %s %s %d\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
 			break
-		} else {
+		} /* else {
 			fmt.Printf("No CRD object of %s\n", functionName)
-		}
+		} */
 	}
 
 	// Find the CRD for the current function

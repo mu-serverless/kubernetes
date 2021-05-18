@@ -37,6 +37,7 @@ import (
 	"time"
 	"path/filepath"
 	//"os"
+	e "errors"
 
 	apps "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
@@ -553,14 +554,32 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		return nil
 	}
 
-	name := rs.Name
-	// klog.Infof("\nrs.Namespace: %v\n", rs.Namespace)
-	// nameSpace = rs.Namespace
-	index := strings.LastIndex(name, "-")
-	functionName := name[:index]
-	klog.Infof("functionName: %s", functionName)
-	// nodeNameList := GetPlacementDecision(functionName)
-	// var nodeNameList []string
+	var functionName string
+	if rs.Namespace == "default" {
+		name := rs.Name
+		// klog.Infof("\nrs.Namespace: %v\n", rs.Namespace)
+		// nameSpace = rs.Namespace
+		index := strings.LastIndex(name, "-")
+		functionName = name[:index]
+		index = strings.LastIndex(functionName, "-")
+		if index >= 0 {
+			functionName = functionName[:index]
+			index = strings.LastIndex(functionName, "-")
+			if index >= 0 {
+				functionName = functionName[:index]
+			} else {
+				functionName = ""
+			}
+		} else {
+			functionName = ""
+		}
+		klog.Infof("functionName: %s", functionName)
+		klog.Infof("len(filteredPods): %d, int(*(rs.Spec.Replicas)): %d", len(filteredPods), int(*(rs.Spec.Replicas)))
+		// klog.Infof("length of functionName: %d", len(functionName))
+		// nodeNameList := GetPlacementDecision(functionName)
+		// var nodeNameList []string
+	}
+
 	if diff < 0 {
 		diff *= -1
 		if diff > rsc.burstReplicas {
@@ -575,8 +594,19 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		klog.V(2).InfoS("Too few replicas", "replicaSet", klog.KObj(rs), "need", *(rs.Spec.Replicas), "creating", diff)
 		var successfulCreations int
 		var err error
-		klog.Infof("Try to get the placement decision for function: %s", functionName)
-		nodeNameList := GetPlacementDecision(functionName, rs.Namespace)
+		var nodeNameList []string
+		if len(functionName) > 0 {
+			klog.Infof("Try to get the placement decision for function: %s", functionName)
+			nodeNameList, err = rsc.GetPlacementDecision(functionName, rs.Namespace, filteredPods, rs)
+			klog.Infof("nodeNameList: %v", nodeNameList)
+			// if nodeNameList == nil {
+			if err != nil {
+				return err
+			}
+		} else {
+			klog.Infof("functionName == \"\"")
+			nodeNameList = nil
+		}
 		// if nodeNameList == nil {
 		// 	klog.Infof("Placement Decision of function %s is null", functionName)
 		// } else {
@@ -927,23 +957,6 @@ type PlacementDecisionCRDList struct {
 	Items []PlacementDecisionCRD `json:"items"`
 }
 
-// func checkNS(client dynamic.Interface, name string) (error) {
-// 	namespace := ["kube-system", "istio-system", "knative-serving", "kube-node-lease", "kube-public", "kube-system"]
-// 	utd, err := client.Resource(gvr).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-// 	if err != nil {
-// 			return nil, err
-// 	}
-// 	data, err := utd.MarshalJSON()
-// 	if err != nil {
-// 			return nil, err
-// 	}
-// 	var ct PlacementDecisionCRD
-// 	if err := json.Unmarshal(data, &ct); err != nil {
-// 			return nil, err
-// 	}
-// 	return , nil
-// }
-
 func getPlacementDecision(client dynamic.Interface, namespace string, name string) (*PlacementDecisionCRD, error) {
 	utd, err := client.Resource(gvr).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
@@ -960,10 +973,10 @@ func getPlacementDecision(client dynamic.Interface, namespace string, name strin
 	return &ct, nil
 }
 
-func GetPlacementDecision(functionName string, namespace string) (nodeName []string) {
+func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, namespace string, filteredPods []*v1.Pod, rs *apps.ReplicaSet) ([]string, error) {
 	if namespace != "default" {
-		// klog.Infof("Pod is not belong to the default namespace. error ns: %s", namespace)
-		return nil
+		klog.Infof("Pod is not belong to the default namespace. error ns: %s", namespace)
+		return nil, e.New("Pod is not belong to the default namespace.")
 	}
 	klog.InfoS("Try to create the in-cluter config")
 	// creates the in-cluster config
@@ -983,17 +996,35 @@ func GetPlacementDecision(functionName string, namespace string) (nodeName []str
 	}
 
 	// Check whether the decision is enabled
-	ct, err := getPlacementDecision(client, "default", functionName)
+	// ct, err := getPlacementDecision(client, "default", functionName)
 	for {
-		ct, err = getPlacementDecision(client, "default", functionName)
+		// Get the latest pods and rs object
+		updatedRs, err := rsc.rsLister.ReplicaSets(namespace).Get(rs.Name)
+		diff := (len(filteredPods) - int(*(updatedRs.Spec.Replicas))) * -1
+		ct, err := getPlacementDecision(client, "default", functionName)
 		if err == nil {
 			// panic(err)
-			fmt.Printf("CRD object %s is found\n", functionName)
+			klog.Infof("Placement decision %s is found\n", functionName)
 			klog.Infof("%s %s %s %d\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
-			break
-		} /* else {
+			// break
+			nodeNameList := ct.Spec.NodeNameList
+			numNodes := ct.Spec.NumNodes
+			nodeName := make([]string, int(numNodes))
+			if int(numNodes) != diff {
+				klog.Infof("[%s] Placement decision `%s` is not updated: numNodes = %d  diff = %d", functionName, ct.Name, numNodes, diff)
+				// return nil, e.New("Placement decision is not updated")
+				time.Sleep(1000 * time.Millisecond)
+			} else {
+				parts := strings.Split(nodeNameList, "%")
+				for i := 0; i < int(numNodes); i++ {
+					nodeName[i] = parts[i]
+				}
+				return nodeName, nil
+			}
+		} else {
 			fmt.Printf("No CRD object of %s\n", functionName)
-		} */
+			return nil, nil
+		}
 	}
 
 	// Find the CRD for the current function
@@ -1007,12 +1038,18 @@ func GetPlacementDecision(functionName string, namespace string) (nodeName []str
 	klog.Infof("%s %s %s %d\n", ct.Namespace, ct.Name, ct.Spec.NodeNameList, ct.Spec.NumNodes)
 	*/
 
+	/*
 	nodeNameList := ct.Spec.NodeNameList
 	numNodes := ct.Spec.NumNodes
 	nodeName = make([]string, int(numNodes))
+	if int(numNodes) != diff {
+		klog.Infof("[%s] Placement decision `%s` is not updated: numNodes = %d  diff = %d", functionName, ct.Name, numNodes, diff)
+		return nil
+	}
 	parts := strings.Split(nodeNameList, "%")
 	for i := 0; i < int(numNodes); i++ {
 		nodeName[i] = parts[i]
 	}
 	return nodeName
+	*/
 }

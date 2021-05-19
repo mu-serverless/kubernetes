@@ -69,6 +69,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"encoding/json"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 const (
@@ -996,11 +997,24 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 	}
 
 	// Check whether the decision is enabled
-	// ct, err := getPlacementDecision(client, "default", functionName)
 	for {
 		// Get the latest pods and rs object
-		updatedRs, err := rsc.rsLister.ReplicaSets(namespace).Get(rs.Name)
-		diff := (len(filteredPods) - int(*(updatedRs.Spec.Replicas))) * -1
+		index := strings.LastIndex(rs.Name, "-")
+		deploymentName := rs.Name[:index]
+		klog.Infof("deploymentName: %s\n", deploymentName)
+		deploymentRes := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+		updatedDeploy, err := client.Resource(deploymentRes).Namespace(namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
+		if err != nil {
+			panic(err)
+		}
+		replicas, found, err := unstructured.NestedInt64(updatedDeploy.Object, "spec", "replicas")
+		if err != nil || !found {
+			fmt.Printf("Replicas not found for deployment %s: error=%s", updatedDeploy.GetName(), err)
+		}
+		klog.Infof("Replicas of %s: %d\n", deploymentName, replicas)
+		
+		// updatedRs, err := rsc.rsLister.ReplicaSets(namespace).Get(rs.Name)
+		diff := (len(filteredPods) - int(replicas)) * -1
 		ct, err := getPlacementDecision(client, "default", functionName)
 		if err == nil {
 			// panic(err)

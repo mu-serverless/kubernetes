@@ -554,7 +554,9 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for %v %#v: %v", rsc.Kind, rs, err))
 		return nil
 	}
-
+	if len(filteredPods) > 0 {
+		klog.Infof("Pod name: %s, node name: %s", filteredPods[0].Name, filteredPods[0].Spec.NodeName)
+	}
 	var functionName string
 	if rs.Namespace == "default" {
 		name := rs.Name
@@ -598,7 +600,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		var nodeNameList []string
 		if len(functionName) > 0 {
 			klog.Infof("Try to get the placement decision for function: %s", functionName)
-			nodeNameList, err = rsc.GetPlacementDecision(functionName, rs.Namespace, filteredPods, rs)
+			nodeNameList, diff, err = rsc.GetPlacementDecision(functionName, rs.Namespace, filteredPods, rs)
 			klog.Infof("nodeNameList: %v", nodeNameList)
 			// if nodeNameList == nil {
 			if err != nil {
@@ -906,7 +908,19 @@ func getPodsToDelete(filteredPods, relatedPods []*v1.Pod, diff int) []*v1.Pod {
 	}
 	return filteredPods[:diff]
 }
+/*
+func getPodsToDeleteBasedOnNodeResourceUsage(filteredPods, relatedPods []*v1.Pod, diff int, rs *apps.ReplicaSet) []*v1.Pod {
+	if diff < len(filteredPods) {
+		if rs.Namespace == "default" { // Customized scale down will only be applied to Knative services in `default` ns
 
+		} else {
+			podsWithRanks := getPodsRankedByRelatedPodsOnSameNode(filteredPods, relatedPods)
+			sort.Sort(podsWithRanks)
+		}
+	}
+	return filteredPods[:diff]
+}
+*/
 // getPodsRankedByRelatedPodsOnSameNode returns an ActivePodsWithRanks value
 // that wraps podsToRank and assigns each pod a rank equal to the number of
 // active pods in relatedPods that are colocated on the same node with the pod.
@@ -974,10 +988,10 @@ func getPlacementDecision(client dynamic.Interface, namespace string, name strin
 	return &ct, nil
 }
 
-func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, namespace string, filteredPods []*v1.Pod, rs *apps.ReplicaSet) ([]string, error) {
+func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, namespace string, filteredPods []*v1.Pod, rs *apps.ReplicaSet) ([]string, int, error) {
 	if namespace != "default" {
 		klog.Infof("Pod is not belong to the default namespace. error ns: %s", namespace)
-		return nil, e.New("Pod is not belong to the default namespace.")
+		return nil, 0, e.New("Pod is not belong to the default namespace.")
 	}
 	klog.InfoS("Try to create the in-cluter config")
 	// creates the in-cluster config
@@ -1033,11 +1047,11 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 				for i := 0; i < int(numNodes); i++ {
 					nodeName[i] = parts[i]
 				}
-				return nodeName, nil
+				return nodeName, diff, nil
 			}
 		} else {
 			fmt.Printf("No CRD object of %s\n", functionName)
-			return nil, nil
+			return nil, diff, nil
 		}
 	}
 
@@ -1067,3 +1081,98 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 	return nodeName
 	*/
 }
+/*
+// scrapeNodeCapacity gets the CPU/Mem profiles of each worker nodes in the cluster.
+func scrapeNodeCapacity() ([]float64, []float64, []string) {
+	// creates the in-cluster config
+	config, err := rest.InClusterConfig()
+	if err != nil{
+		fmt.Printf("Error in rest.InClusterConfig()\n")
+		return nil, nil, nil
+	}
+	// mc, err := metrics.NewForConfig(config)
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return nil, nil, nil
+	}
+	nodes, err := clientset.CoreV1().Nodes().List(metav1.ListOptions{})
+	// fmt.Printf("nodes = %v, Type = %T\n", nodes, nodes)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return nil, nil, nil
+	}
+
+	fmt.Printf("There are %d nodes in the cluster\n", len(nodes.Items))
+
+	num := len(nodes.Items) - 1
+	nodeCPU := make([]float64, num)
+	nodeMem := make([]float64, num)
+	nodeName := make([]string, num)
+	flag := 0
+	for i, nodeMetric := range nodes.Items {
+		// strings.Contains(nodeMetric.ObjectMeta.Name, "node0") == false
+		// exclude the first (master) node
+		if flag == 0 {
+			flag = 1
+			continue
+		}
+		if flag == 1 {
+			// fmt.Printf("nodeMetric.ObjectMeta.Name = %v, Type = %T\n", nodeMetric.ObjectMeta.Name, nodeMetric.ObjectMeta.Name)
+			nodeName[i - 1] = nodeMetric.ObjectMeta.Name
+			// fmt.Printf("nodeMetric.Status.Capacity.Cpu() = %v, Type = %T\n", nodeMetric.Status.Capacity.Cpu(), nodeMetric.Status.Capacity.Cpu())
+			// fmt.Printf("nodeMetric.Status.Capacity.Memory() = %v, Type = %T\n", nodeMetric.Status.Capacity.Memory(), nodeMetric.Status.Capacity.Memory())
+			cpu := nodeMetric.Status.Capacity.Cpu().MilliValue()
+			cpu_float := float64(cpu) // unit: mCPU
+			// clusterCPU += cpu_float
+			nodeCPU[i - 1] = cpu_float
+			mem := nodeMetric.Status.Capacity.Memory().Value()
+			// fmt.Printf("mem = %v\n", mem)
+			mem_float := float64(mem) / 1024 / 1024 // unit: MiB
+			// clusterMem += mem_float
+			nodeMem[i - 1] = mem_float
+		}
+	}
+	fmt.Printf("nodeCPU = %v, nodeMem = %v\n", nodeCPU, nodeMem)
+
+	return nodeCPU, nodeMem, nodeName
+}
+
+// Scrape_resource_metrics_nodes runs a single scrape for Node CPU/Memory.
+func scrapeNodeUsage() ([]float64, []float64) {
+	// creates the in-cluster config
+	config, err := rest.InClusterConfig()
+	if err != nil{
+		fmt.Printf("Error in rest.InClusterConfig()\n")
+		return nil, nil
+	}
+	mc, err := k8smetrics.NewForConfig(config)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return nil, nil
+	}
+	nodeMetrics, err := mc.MetricsV1beta1().NodeMetricses().List(metav1.ListOptions{})
+	if err != nil {
+		fmt.Println("Error:", err)
+		return nil, nil
+	}
+	// fmt.Printf("nodeMetrics = %v, Type = %T\n", nodeMetrics, nodeMetrics)
+	num := len(nodeMetrics.Items) - 1
+	nodeCPUUsage := make([]float64, num)
+	nodeMemUsage := make([]float64, num)
+	// var nodeNum float64
+	for i, nodeMetric := range nodeMetrics.Items {
+		// fmt.Printf("Node_Name = %v, Timestamp = %v, Window = %v, Usage = %v\n", nodeMetric.ObjectMeta.Name, nodeMetric.Timestamp, nodeMetric.Window, nodeMetric.Usage)
+		if strings.Contains(nodeMetric.ObjectMeta.Name, "node0") == false {
+			// nodeNum++
+			cpu := nodeMetric.Usage.Cpu().MilliValue()
+			cpu_float := float64(cpu) // unit: mCPU
+			nodeCPUUsage[i - 1] = cpu_float
+			mem := nodeMetric.Usage.Memory().Value()
+			mem_float := float64(mem) / 1024 / 1024 // unit: MiB
+			nodeMemUsage[i - 1] = mem_float
+			// fmt.Printf("Node Name: %s, CPU usage: %vm (Type: %T), Memory usage: %vMiB (Type: %T)\n", nodeMetric.ObjectMeta.Name, cpu_float, cpu_float, mem_float, mem_float)
+		}
+	}
+	return nodeCPUUsage, nodeMemUsage
+} */

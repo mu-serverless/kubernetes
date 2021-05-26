@@ -36,8 +36,11 @@ import (
 	"sync"
 	"time"
 	"path/filepath"
+	"flag"
 	//"os"
 	e "errors"
+	// "net/http"
+	// "io/ioutil"
 
 	apps "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
@@ -70,6 +73,7 @@ import (
 	"encoding/json"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/util/homedir"
 )
 
 const (
@@ -993,13 +997,20 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 		klog.Infof("Pod is not belong to the default namespace. error ns: %s", namespace)
 		return nil, 0, e.New("Pod is not belong to the default namespace.")
 	}
-	klog.InfoS("Try to create the in-cluter config")
+	klog.InfoS("Try to create the out-of-cluter config")
 	// creates the in-cluster config
 	// config, err := rest.InClusterConfig()
 	// kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	kubeconfig := filepath.Join("/users/sqi009", ".kube", "config")
-	klog.Infof("kubeconfig: %s", kubeconfig)
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	// kubeconfig := filepath.Join("/users/sqi009", ".kube", "config")
+	// klog.Infof("kubeconfig: %s", kubeconfig)
+	var kubeconfig *string
+	if home := homedir.HomeDir(); home != "" {
+		// fmt.Printf("HomeDir %s\n", home)
+		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+	} else {
+		kubeconfig = flag.String("kubeconfig", "/users/sqi009/.kube/config", "absolute path to the kubeconfig file")
+	}
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -1025,7 +1036,8 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 		if err != nil || !found {
 			fmt.Printf("Replicas not found for deployment %s: error=%s", updatedDeploy.GetName(), err)
 		}
-		klog.Infof("Replicas of %s: %d\n", deploymentName, replicas)
+		klog.Infof("Replica Name: %s\n", rs.Name)
+		klog.Infof("Replicas Count of %s: %d\n", deploymentName, replicas)
 		
 		// updatedRs, err := rsc.rsLister.ReplicaSets(namespace).Get(rs.Name)
 		diff := (len(filteredPods) - int(replicas)) * -1
@@ -1081,98 +1093,16 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 	return nodeName
 	*/
 }
+
+/* Http (curl) request to scrape metrics from istio */
 /*
-// scrapeNodeCapacity gets the CPU/Mem profiles of each worker nodes in the cluster.
-func scrapeNodeCapacity() ([]float64, []float64, []string) {
-	// creates the in-cluster config
-	config, err := rest.InClusterConfig()
-	if err != nil{
-		fmt.Printf("Error in rest.InClusterConfig()\n")
-		return nil, nil, nil
-	}
-	// mc, err := metrics.NewForConfig(config)
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return nil, nil, nil
-	}
-	nodes, err := clientset.CoreV1().Nodes().List(metav1.ListOptions{})
-	// fmt.Printf("nodes = %v, Type = %T\n", nodes, nodes)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return nil, nil, nil
-	}
-
-	fmt.Printf("There are %d nodes in the cluster\n", len(nodes.Items))
-
-	num := len(nodes.Items) - 1
-	nodeCPU := make([]float64, num)
-	nodeMem := make([]float64, num)
-	nodeName := make([]string, num)
-	flag := 0
-	for i, nodeMetric := range nodes.Items {
-		// strings.Contains(nodeMetric.ObjectMeta.Name, "node0") == false
-		// exclude the first (master) node
-		if flag == 0 {
-			flag = 1
-			continue
-		}
-		if flag == 1 {
-			// fmt.Printf("nodeMetric.ObjectMeta.Name = %v, Type = %T\n", nodeMetric.ObjectMeta.Name, nodeMetric.ObjectMeta.Name)
-			nodeName[i - 1] = nodeMetric.ObjectMeta.Name
-			// fmt.Printf("nodeMetric.Status.Capacity.Cpu() = %v, Type = %T\n", nodeMetric.Status.Capacity.Cpu(), nodeMetric.Status.Capacity.Cpu())
-			// fmt.Printf("nodeMetric.Status.Capacity.Memory() = %v, Type = %T\n", nodeMetric.Status.Capacity.Memory(), nodeMetric.Status.Capacity.Memory())
-			cpu := nodeMetric.Status.Capacity.Cpu().MilliValue()
-			cpu_float := float64(cpu) // unit: mCPU
-			// clusterCPU += cpu_float
-			nodeCPU[i - 1] = cpu_float
-			mem := nodeMetric.Status.Capacity.Memory().Value()
-			// fmt.Printf("mem = %v\n", mem)
-			mem_float := float64(mem) / 1024 / 1024 // unit: MiB
-			// clusterMem += mem_float
-			nodeMem[i - 1] = mem_float
-		}
-	}
-	fmt.Printf("nodeCPU = %v, nodeMem = %v\n", nodeCPU, nodeMem)
-
-	return nodeCPU, nodeMem, nodeName
+func scrapeIstioMetrics(name string) []int {
+	url := "http://localhost:15000/clusters?format=json"
+	req, _ := http.NewRequest("GET", url, nil)
+	res, _ := http.DefaultClient.Do(req)
+	fmt.Println(res)
+	defer res.Body.Close()
+	body, _ := ioutil.ReadAll(res.Body)
+	fmt.Println(string(body))
 }
-
-// Scrape_resource_metrics_nodes runs a single scrape for Node CPU/Memory.
-func scrapeNodeUsage() ([]float64, []float64) {
-	// creates the in-cluster config
-	config, err := rest.InClusterConfig()
-	if err != nil{
-		fmt.Printf("Error in rest.InClusterConfig()\n")
-		return nil, nil
-	}
-	mc, err := k8smetrics.NewForConfig(config)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return nil, nil
-	}
-	nodeMetrics, err := mc.MetricsV1beta1().NodeMetricses().List(metav1.ListOptions{})
-	if err != nil {
-		fmt.Println("Error:", err)
-		return nil, nil
-	}
-	// fmt.Printf("nodeMetrics = %v, Type = %T\n", nodeMetrics, nodeMetrics)
-	num := len(nodeMetrics.Items) - 1
-	nodeCPUUsage := make([]float64, num)
-	nodeMemUsage := make([]float64, num)
-	// var nodeNum float64
-	for i, nodeMetric := range nodeMetrics.Items {
-		// fmt.Printf("Node_Name = %v, Timestamp = %v, Window = %v, Usage = %v\n", nodeMetric.ObjectMeta.Name, nodeMetric.Timestamp, nodeMetric.Window, nodeMetric.Usage)
-		if strings.Contains(nodeMetric.ObjectMeta.Name, "node0") == false {
-			// nodeNum++
-			cpu := nodeMetric.Usage.Cpu().MilliValue()
-			cpu_float := float64(cpu) // unit: mCPU
-			nodeCPUUsage[i - 1] = cpu_float
-			mem := nodeMetric.Usage.Memory().Value()
-			mem_float := float64(mem) / 1024 / 1024 // unit: MiB
-			nodeMemUsage[i - 1] = mem_float
-			// fmt.Printf("Node Name: %s, CPU usage: %vm (Type: %T), Memory usage: %vMiB (Type: %T)\n", nodeMetric.ObjectMeta.Name, cpu_float, cpu_float, mem_float, mem_float)
-		}
-	}
-	return nodeCPUUsage, nodeMemUsage
-} */
+*/

@@ -36,11 +36,11 @@ import (
 	"sync"
 	"time"
 	"path/filepath"
-	//"flag"
-	//"os"
+	"os"
 	e "errors"
-	// "net/http"
-	// "io/ioutil"
+	"net/http"
+	"io/ioutil"
+	"strconv"
 
 	apps "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
@@ -73,7 +73,6 @@ import (
 	"encoding/json"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	//"k8s.io/client-go/util/homedir"
 )
 
 const (
@@ -989,8 +988,8 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 	klog.InfoS("Try to create the out-of-cluter config")
 	// creates the in-cluster config
 	// config, err := rest.InClusterConfig()
-	// kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	kubeconfig := filepath.Join("/users/vmit003", ".kube", "config")
+	kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	// kubeconfig := filepath.Join("/users/sqi009", ".kube", "config")
 	// klog.Infof("kubeconfig: %s", kubeconfig)
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
@@ -1076,3 +1075,71 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 	*/
 }
 
+func getPodsToDeleteBasedOnPodCapacity(filteredPods, relatedPods []*v1.Pod, diff int, rs *apps.ReplicaSet, functionName string) []*v1.Pod {
+	if diff < len(filteredPods) {
+		if rs.Namespace == "default" && len(functionName) > 0 { // Customized scale down will only be applied to Knative services in `default` ns
+			podsWithRanks := getPodsRankedByPodCapacity(filteredPods, relatedPods, functionName)
+			sort.Sort(podsWithRanks)
+		} else {
+			podsWithRanks := getPodsRankedByRelatedPodsOnSameNode(filteredPods, relatedPods)
+			sort.Sort(podsWithRanks)
+		}
+	}
+	return filteredPods[:diff]
+}
+// */
+func getPodsRankedByPodCapacity(podsToRank, relatedPods []*v1.Pod, functionName string) controller.ActivePodsWithRanks {
+	// Get the per pod metrics from istio
+	podCapacityForRank := scrapeIstioMetrics(functionName, podsToRank)
+
+	// Rank the pod based on its capacity
+	ranks := make([]int, len(podsToRank))
+	for i, pod := range podsToRank {
+		if len(pod.Status.PodIPs) > 0 {
+			ranks[i] = podCapacityForRank[pod.Status.PodIPs[0].IP] * -1
+		}
+	}
+	return controller.ActivePodsWithRanks{Pods: podsToRank, Rank: ranks}
+}
+/* Http (curl) request to scrape metrics from istio */
+// /*
+func scrapeIstioMetrics(functionName string, podsToRank []*v1.Pod) map[string]int {
+	url := "http://localhost:15000/clusters"
+	req, _ := http.NewRequest("GET", url, nil)
+	res, _ := http.DefaultClient.Do(req)
+	// fmt.Println(res)
+	defer res.Body.Close()
+	body, _ := ioutil.ReadAll(res.Body)
+	// fmt.Println(string(body))
+	// Get IP of all the pods to be ranked
+	podIPlist := make([]string, len(podsToRank))
+	for i, pod := range podsToRank {
+		if len(pod.Status.PodIPs) > 0 {
+			podIPlist[i] = pod.Status.PodIPs[0].IP
+		}
+	}
+	// Parse the return metrics, read the string line by line
+	podCapacityForRank := make(map[string]int)
+	for _, line := range strings.Split(strings.TrimSuffix(string(body), "\n"), "\n") {
+		fmt.Println(line)
+		if strings.Contains(line, functionName) {
+			if strings.Contains(line, "::capacity_100::") {
+				for _, ip := range podIPlist {
+					if strings.Contains(line, ip) {
+						// record the pod's capacity
+						index := strings.LastIndex(line, ":")
+						capacity100Value := line[index+1:]
+						// fmt.Println(capacity100Value)
+                        intCapacity100Value, err := strconv.Atoi(capacity100Value)
+						if err != nil {
+                            fmt.Println("String convertor has error\n")
+                        }
+                        podCapacityForRank[ip] = intCapacity100Value
+					}
+				}
+			}
+		}
+	}
+	// fmt.Println(podCapacityForRank)
+	return podCapacityForRank
+}

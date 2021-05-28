@@ -36,7 +36,7 @@ import (
 	"sync"
 	"time"
 	"path/filepath"
-	"flag"
+	//"flag"
 	//"os"
 	e "errors"
 	// "net/http"
@@ -73,7 +73,7 @@ import (
 	"encoding/json"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/util/homedir"
+	//"k8s.io/client-go/util/homedir"
 )
 
 const (
@@ -531,6 +531,7 @@ func (rsc *ReplicaSetController) worker() {
 
 func (rsc *ReplicaSetController) processNextWorkItem() bool {
 	key, quit := rsc.queue.Get()
+    klog.Infof("+++++++++ process next work item %q ++++++++++++", key)
 	if quit {
 		return false
 	}
@@ -538,11 +539,13 @@ func (rsc *ReplicaSetController) processNextWorkItem() bool {
 
 	err := rsc.syncHandler(key.(string))
 	if err == nil {
+        klog.Infof("+++++++++ !!!!!!!!! %q is to be forgot ++++++++++++", key)
 		rsc.queue.Forget(key)
 		return true
 	}
 
 	utilruntime.HandleError(fmt.Errorf("sync %q failed with %v", key, err))
+    klog.Infof("+++++++++ Add %q into rate limited queue ++++++++++++", key)
 	rsc.queue.AddRateLimited(key)
 
 	return true
@@ -562,10 +565,9 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		klog.Infof("Pod name: %s, node name: %s", filteredPods[0].Name, filteredPods[0].Spec.NodeName)
 	}
 	var functionName string
+	var nodeNameList []string
 	if rs.Namespace == "default" {
 		name := rs.Name
-		// klog.Infof("\nrs.Namespace: %v\n", rs.Namespace)
-		// nameSpace = rs.Namespace
 		index := strings.LastIndex(name, "-")
 		functionName = name[:index]
 		index = strings.LastIndex(functionName, "-")
@@ -580,11 +582,21 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		} else {
 			functionName = ""
 		}
-		klog.Infof("functionName: %s", functionName)
+        var err error
 		klog.Infof("len(filteredPods): %d, int(*(rs.Spec.Replicas)): %d", len(filteredPods), int(*(rs.Spec.Replicas)))
-		// klog.Infof("length of functionName: %d", len(functionName))
-		// nodeNameList := GetPlacementDecision(functionName)
-		// var nodeNameList []string
+		if len(functionName) > 0 && diff < 0 {
+			klog.Infof("Try to get the placement decision for function: %s", functionName)
+			nodeNameList, diff, err = rsc.GetPlacementDecision(functionName, rs.Namespace, filteredPods, rs)
+			klog.Infof("nodeNameList: %v", nodeNameList)
+			// if nodeNameList == nil {
+			if err != nil {
+				klog.Infof("= = = = = = = = = = = = Get Placement Decision Error = = = = = = = = = = = =")
+				return err
+			}
+		} else {
+			// klog.Infof("functionName == \"\"")
+			nodeNameList = nil
+		}
 	}
 
 	if diff < 0 {
@@ -600,25 +612,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 		rsc.expectations.ExpectCreations(rsKey, diff)
 		klog.V(2).InfoS("Too few replicas", "replicaSet", klog.KObj(rs), "need", *(rs.Spec.Replicas), "creating", diff)
 		var successfulCreations int
-		var err error
-		var nodeNameList []string
-		if len(functionName) > 0 {
-			klog.Infof("Try to get the placement decision for function: %s", functionName)
-			nodeNameList, diff, err = rsc.GetPlacementDecision(functionName, rs.Namespace, filteredPods, rs)
-			klog.Infof("nodeNameList: %v", nodeNameList)
-			// if nodeNameList == nil {
-			if err != nil {
-				return err
-			}
-		} else {
-			klog.Infof("functionName == \"\"")
-			nodeNameList = nil
-		}
-		// if nodeNameList == nil {
-		// 	klog.Infof("Placement Decision of function %s is null", functionName)
-		// } else {
-		// 	klog.Infof("Placement Decision of function %s: %s", functionName, nodeNameList)
-		// }
+		
 		if nodeNameList == nil || diff != len(nodeNameList) {
 			// Batch the pod creates. Batch sizes start at SlowStartInitialBatchSize
 			// and double with each successful iteration in a kind of "slow start".
@@ -628,8 +622,8 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 			// prevented from spamming the API service with the pod create requests
 			// after one of its pods fails.  Conveniently, this also prevents the
 			// event spam that those failures would generate.
-			klog.Infof("# of nodeName: %d; Value of `diff`: %d", len(nodeNameList), diff)
-			klog.InfoS("Try to run slowStartBatch")
+			// klog.Infof("# of nodeName: %d; Value of `diff`: %d", len(nodeNameList), diff)
+			// klog.InfoS("Try to run slowStartBatch")
 			successfulCreations, err = slowStartBatch(diff, controller.SlowStartInitialBatchSize, func() error {
 				err := rsc.podControl.CreatePodsWithControllerRef(rs.Namespace, &rs.Spec.Template, rs, metav1.NewControllerRef(rs, rsc.GroupVersionKind))
 				if err != nil {
@@ -679,7 +673,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 
 		// Choose which Pods to delete, preferring those in earlier phases of startup.
 		podsToDelete := getPodsToDelete(filteredPods, relatedPods, diff)
-
+        // podsToDelete := getPodsToDeleteBasedOnPodCapacity(filteredPods, relatedPods, diff, rs, functionName)
 		// Snapshot the UIDs (ns/name) of the pods we're expecting to see
 		// deleted, so we know to record their expectations exactly once either
 		// when we see it as an update of the deletion timestamp, or as a delete.
@@ -724,6 +718,7 @@ func (rsc *ReplicaSetController) manageReplicas(filteredPods []*v1.Pod, rs *apps
 // meaning it did not expect to see any more of its pods created or deleted. This function is not meant to be
 // invoked concurrently with the same key.
 func (rsc *ReplicaSetController) syncReplicaSet(key string) error {
+	klog.Infof("Start syncing %v %q (%v)", rsc.Kind, key, time.Now())
 	startTime := time.Now()
 	defer func() {
 		klog.V(4).Infof("Finished syncing %v %q (%v)", rsc.Kind, key, time.Since(startTime))
@@ -782,11 +777,17 @@ func (rsc *ReplicaSetController) syncReplicaSet(key string) error {
 		return err
 	}
 	// Resync the ReplicaSet after MinReadySeconds as a last line of defense to guard against clock-skew.
+	klog.Infof("============ Resync the ReplicaSet after MinReadySeconds as a last line of defense to guard against clock-skew. ==========")
+	klog.Infof("updatedRS.Spec.MinReadySeconds: %v", updatedRS.Spec.MinReadySeconds)
+	klog.Infof("updatedRS.Status.ReadyReplicas: %v ======== *(updatedRS.Spec.Replicas): %v", updatedRS.Status.ReadyReplicas, *(updatedRS.Spec.Replicas))
+	klog.Infof("updatedRS.Status.AvailableReplicas: %v ======== *(updatedRS.Spec.Replicas): %v", updatedRS.Status.AvailableReplicas, *(updatedRS.Spec.Replicas))
 	if manageReplicasErr == nil && updatedRS.Spec.MinReadySeconds > 0 &&
 		updatedRS.Status.ReadyReplicas == *(updatedRS.Spec.Replicas) &&
 		updatedRS.Status.AvailableReplicas != *(updatedRS.Spec.Replicas) {
 		rsc.queue.AddAfter(key, time.Duration(updatedRS.Spec.MinReadySeconds)*time.Second)
+        klog.Infof("Add the rs: %q into the queue", key)
 	}
+	klog.Infof("============ Done Resync the ReplicaSet after MinReadySeconds ==========")
 	return manageReplicasErr
 }
 
@@ -912,19 +913,7 @@ func getPodsToDelete(filteredPods, relatedPods []*v1.Pod, diff int) []*v1.Pod {
 	}
 	return filteredPods[:diff]
 }
-/*
-func getPodsToDeleteBasedOnNodeResourceUsage(filteredPods, relatedPods []*v1.Pod, diff int, rs *apps.ReplicaSet) []*v1.Pod {
-	if diff < len(filteredPods) {
-		if rs.Namespace == "default" { // Customized scale down will only be applied to Knative services in `default` ns
 
-		} else {
-			podsWithRanks := getPodsRankedByRelatedPodsOnSameNode(filteredPods, relatedPods)
-			sort.Sort(podsWithRanks)
-		}
-	}
-	return filteredPods[:diff]
-}
-*/
 // getPodsRankedByRelatedPodsOnSameNode returns an ActivePodsWithRanks value
 // that wraps podsToRank and assigns each pod a rank equal to the number of
 // active pods in relatedPods that are colocated on the same node with the pod.
@@ -1001,16 +990,9 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 	// creates the in-cluster config
 	// config, err := rest.InClusterConfig()
 	// kubeconfig := filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	// kubeconfig := filepath.Join("/users/sqi009", ".kube", "config")
+	kubeconfig := filepath.Join("/users/vmit003", ".kube", "config")
 	// klog.Infof("kubeconfig: %s", kubeconfig)
-	var kubeconfig *string
-	if home := homedir.HomeDir(); home != "" {
-		// fmt.Printf("HomeDir %s\n", home)
-		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
-	} else {
-		kubeconfig = flag.String("kubeconfig", "/users/sqi009/.kube/config", "absolute path to the kubeconfig file")
-	}
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -1038,7 +1020,7 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 		}
 		klog.Infof("Replica Name: %s\n", rs.Name)
 		klog.Infof("Replicas Count of %s: %d\n", deploymentName, replicas)
-		
+
 		// updatedRs, err := rsc.rsLister.ReplicaSets(namespace).Get(rs.Name)
 		diff := (len(filteredPods) - int(replicas)) * -1
 		ct, err := getPlacementDecision(client, "default", functionName)
@@ -1052,18 +1034,18 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 			nodeName := make([]string, int(numNodes))
 			if int(numNodes) != diff {
 				klog.Infof("[%s] Placement decision `%s` is not updated: numNodes = %d  diff = %d", functionName, ct.Name, numNodes, diff)
-				// return nil, e.New("Placement decision is not updated")
-				time.Sleep(1000 * time.Millisecond)
+				return nil, diff * -1, e.New("Placement decision is not updated")
+				// time.Sleep(1 * time.Millisecond)
 			} else {
 				parts := strings.Split(nodeNameList, "%")
 				for i := 0; i < int(numNodes); i++ {
 					nodeName[i] = parts[i]
 				}
-				return nodeName, diff, nil
+				return nodeName, diff * -1, nil
 			}
 		} else {
 			fmt.Printf("No CRD object of %s\n", functionName)
-			return nil, diff, nil
+			return nil, diff * -1, nil
 		}
 	}
 
@@ -1094,15 +1076,3 @@ func (rsc *ReplicaSetController) GetPlacementDecision(functionName string, names
 	*/
 }
 
-/* Http (curl) request to scrape metrics from istio */
-/*
-func scrapeIstioMetrics(name string) []int {
-	url := "http://localhost:15000/clusters?format=json"
-	req, _ := http.NewRequest("GET", url, nil)
-	res, _ := http.DefaultClient.Do(req)
-	fmt.Println(res)
-	defer res.Body.Close()
-	body, _ := ioutil.ReadAll(res.Body)
-	fmt.Println(string(body))
-}
-*/
